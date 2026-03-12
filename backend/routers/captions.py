@@ -163,6 +163,7 @@ def _do_burn(task_id: str, project_dir: Path, renderer: str):
         burn_captions(
             str(video_path), str(ass_path), str(output_path),
             style_name=style_name,
+            on_progress=lambda p, m: tm.update_task(task_id, progress=p, message=m),
         )
 
     return {"output": str(output_path), "renderer": actual_renderer}
@@ -181,6 +182,42 @@ def _resolve_renderer(renderer: str) -> str:
             return "pillow"
         return "moviepy"
     return "pillow"
+
+
+@router.post("/{project_name}/save")
+async def save_captions_edit(project_name: str, payload: dict):
+    """Save edited captions (text, timing, position changes)."""
+    project_dir = PROJECTS_DIR / project_name
+    if not project_dir.exists():
+        raise HTTPException(404, "Project not found")
+
+    captions = payload.get("captions", [])
+    if not captions:
+        raise HTTPException(400, "No captions provided")
+
+    captions_dir = project_dir / "captions"
+    captions_dir.mkdir(exist_ok=True)
+    save_captions(captions, str(captions_dir / "captions.json"))
+
+    # Detect style
+    style_path = captions_dir / "style.txt"
+    style_name = style_path.read_text().strip() if style_path.exists() else "classic"
+
+    # Regenerate SRT + ASS from updated captions
+    srt_content = generate_srt(captions, style=style_name)
+    with open(captions_dir / "captions.srt", "w") as f:
+        f.write(srt_content)
+
+    video_path = find_source_video(project_dir)
+    params = get_video_params(str(video_path))
+    ass_content = generate_ass(
+        captions, style=style_name,
+        video_width=params["width"], video_height=params["height"],
+    )
+    with open(captions_dir / "captions.ass", "w") as f:
+        f.write(ass_content)
+
+    return {"status": "saved", "caption_count": len(captions)}
 
 
 @router.post("/burn")

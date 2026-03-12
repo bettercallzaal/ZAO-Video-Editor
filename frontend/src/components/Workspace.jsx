@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import VideoPlayer from './VideoPlayer';
+import CaptionOverlay from './CaptionOverlay';
 import StageStatus from './StageStatus';
 import UploadPanel from './UploadPanel';
 import TranscriptEditor from './TranscriptEditor';
@@ -28,7 +29,16 @@ export default function Workspace({ projectName, onBack }) {
   const [guidedMode, setGuidedMode] = useState(false);
   const [videoSrc, setVideoSrc] = useState('');
   const [seekTime, setSeekTime] = useState(null);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [videoDuration, setVideoDuration] = useState(0);
+  const [videoRect, setVideoRect] = useState(null);
   const videoRef = useRef(null);
+
+  // Caption state shared between CaptionPanel and CaptionOverlay
+  const [liveCaptions, setLiveCaptions] = useState([]);
+  const [captionStyle, setCaptionStyle] = useState('classic');
+  const [captionPosition, setCaptionPosition] = useState({ x: 50, y: 88 });
+  const [selectedCaptionId, setSelectedCaptionId] = useState(null);
 
   const refreshProject = useCallback(async () => {
     try {
@@ -36,7 +46,8 @@ export default function Workspace({ projectName, onBack }) {
       setProject(data);
 
       // Set video source based on what's available
-      if (data.stages.burn_captions === 'complete') {
+      // When on captions tab, prefer un-captioned source so overlay is visible
+      if (data.stages.burn_captions === 'complete' && activeTab !== 'captions') {
         setVideoSrc(getVideoUrl(projectName, 'captioned'));
       } else if (data.stages.assembly === 'complete') {
         setVideoSrc(getVideoUrl(projectName, 'assembled'));
@@ -46,13 +57,38 @@ export default function Workspace({ projectName, onBack }) {
     } catch (e) {
       console.error('Failed to load project:', e);
     }
-  }, [projectName]);
+  }, [projectName, activeTab]);
 
   useEffect(() => { refreshProject(); }, [refreshProject]);
+
+  // When switching to captions tab, use un-captioned source
+  useEffect(() => {
+    if (!project) return;
+    if (activeTab === 'captions') {
+      if (project.stages.assembly === 'complete') {
+        setVideoSrc(getVideoUrl(projectName, 'assembled'));
+      } else if (project.stages.upload === 'complete') {
+        setVideoSrc(getVideoUrl(projectName, 'source'));
+      }
+    } else if (project.stages.burn_captions === 'complete') {
+      setVideoSrc(getVideoUrl(projectName, 'captioned'));
+    }
+  }, [activeTab, project, projectName]);
 
   const handleSeek = (time) => {
     setSeekTime(time);
   };
+
+  const handleTimeUpdate = useCallback((time) => {
+    setCurrentTime(time);
+    // Update video rect for overlay positioning
+    if (videoRef.current) {
+      const rect = videoRef.current.getVideoRect();
+      if (rect) setVideoRect(rect);
+      const dur = videoRef.current.getDuration();
+      if (dur && dur !== videoDuration) setVideoDuration(dur);
+    }
+  }, [videoDuration]);
 
   const handleStageComplete = () => {
     refreshProject();
@@ -75,6 +111,8 @@ export default function Workspace({ projectName, onBack }) {
     );
   }
 
+  const showCaptionOverlay = activeTab === 'captions' && liveCaptions.length > 0;
+
   return (
     <div className="h-screen flex flex-col bg-[#0f1419]">
       {/* Top bar */}
@@ -96,9 +134,27 @@ export default function Workspace({ projectName, onBack }) {
 
       {/* Main content */}
       <div className="flex flex-1 min-h-0">
-        {/* Left: Video player */}
+        {/* Left: Video player with caption overlay */}
         <div className="w-1/2 border-r border-gray-800 flex flex-col">
-          <VideoPlayer src={videoSrc} seekTime={seekTime} ref={videoRef} />
+          <VideoPlayer
+            src={videoSrc}
+            seekTime={seekTime}
+            ref={videoRef}
+            onTimeUpdate={handleTimeUpdate}
+          >
+            {showCaptionOverlay && (
+              <CaptionOverlay
+                captions={liveCaptions}
+                currentTime={currentTime}
+                style={captionStyle}
+                position={captionPosition}
+                onPositionChange={setCaptionPosition}
+                videoRect={videoRect}
+                selectedId={selectedCaptionId}
+                onSelect={setSelectedCaptionId}
+              />
+            )}
+          </VideoPlayer>
         </div>
 
         {/* Right: Panels */}
@@ -121,7 +177,7 @@ export default function Workspace({ projectName, onBack }) {
           </div>
 
           {/* Tab content */}
-          <div className="flex-1 overflow-y-auto p-4">
+          <div className="flex-1 overflow-hidden p-4 flex flex-col">
             {activeTab === 'upload' && (
               <UploadPanel
                 projectName={projectName}
@@ -142,6 +198,12 @@ export default function Workspace({ projectName, onBack }) {
                 projectName={projectName}
                 stages={project.stages}
                 onComplete={handleStageComplete}
+                onSeek={handleSeek}
+                currentTime={currentTime}
+                videoDuration={videoDuration}
+                onCaptionsChange={setLiveCaptions}
+                onStyleChange={setCaptionStyle}
+                onPositionChange={setCaptionPosition}
               />
             )}
             {activeTab === 'metadata' && (

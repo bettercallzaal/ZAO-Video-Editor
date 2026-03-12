@@ -162,6 +162,12 @@ export const getSrt = (projectName) =>
 export const getAss = (projectName) =>
   request(`/captions/${encodeURIComponent(projectName)}/ass`);
 
+export const saveCaptions = (projectName, captions) =>
+  request(`/captions/${encodeURIComponent(projectName)}/save`, {
+    method: 'POST',
+    body: JSON.stringify({ captions }),
+  });
+
 // Burn captions (background task)
 export const burnCaptions = (projectName, style = 'classic', renderer = 'auto') =>
   request('/captions/burn', {
@@ -210,6 +216,18 @@ export const listExportFiles = (projectName) =>
 
 export const getExportDownloadUrl = (projectName, filename) =>
   `${BASE}/export/${encodeURIComponent(projectName)}/download/${encodeURIComponent(filename)}`;
+
+// --- Storage ---
+export const getProjectStorage = (projectName) =>
+  request(`/projects/${encodeURIComponent(projectName)}/storage`);
+
+export const getCleanableFiles = (projectName) =>
+  request(`/projects/${encodeURIComponent(projectName)}/cleanable`);
+
+export const cleanupProject = (projectName) =>
+  request(`/projects/${encodeURIComponent(projectName)}/cleanup`, { method: 'POST' });
+
+export const getAllProjectsStorage = () => request('/storage');
 
 // --- Speakers (diarization) ---
 export const diarizeSpeakers = (projectName, numSpeakers = null) =>

@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import ProgressBar from './ProgressBar';
 import SeoChecklist from './SeoChecklist';
+import StoragePanel from './StoragePanel';
 import { createExportPackage, listExportFiles, getExportDownloadUrl } from '../api/client';
 
 export default function ExportPanel({ projectName, stages, onComplete }) {
@@ -94,6 +95,11 @@ export default function ExportPanel({ projectName, stages, onComplete }) {
           ))}
         </div>
       )}
+
+      <hr className="border-gray-800" />
+
+      {/* Storage info & cleanup */}
+      <StoragePanel projectName={projectName} />
     </div>
   );
 }

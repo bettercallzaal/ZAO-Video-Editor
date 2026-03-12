@@ -1,3 +1,4 @@
+import os
 import shutil
 from pathlib import Path
 from fastapi import APIRouter, HTTPException
@@ -7,6 +8,21 @@ from ..models.schemas import ExportRequest
 router = APIRouter(prefix="/api/export", tags=["export"])
 
 PROJECTS_DIR = Path(__file__).parent.parent.parent / "projects"
+
+
+def _link_or_copy(src: Path, dest: Path):
+    """Create a hardlink if possible, fall back to copy.
+
+    Hardlinks share the same inode so they use zero extra disk space
+    while still giving export/ its own directory entry.
+    Symlinks are avoided because FileResponse follows the real path.
+    """
+    if dest.exists():
+        dest.unlink()
+    try:
+        os.link(str(src), str(dest))
+    except OSError:
+        shutil.copy2(str(src), str(dest))
 
 
 @router.post("/package")
@@ -21,38 +37,36 @@ async def create_export_package(req: ExportRequest):
 
     exported = []
 
-    # Copy captioned video (or assembled/main if no captions burned)
+    # Link captioned video (or assembled/main if no captions burned)
     captioned = project_dir / "processing" / "captioned.mp4"
     assembled = project_dir / "processing" / "assembled.mp4"
     if captioned.exists():
-        shutil.copy2(str(captioned), str(exports_dir / "captioned.mp4"))
+        _link_or_copy(captioned, exports_dir / "captioned.mp4")
         exported.append("captioned.mp4")
 
-    # Also copy source video for reference
+    # Also link source video for reference
     if assembled.exists():
-        shutil.copy2(str(assembled), str(exports_dir / "source.mp4"))
+        _link_or_copy(assembled, exports_dir / "source.mp4")
         exported.append("source.mp4")
     else:
         for ext in [".mp4", ".mov", ".mkv", ".webm"]:
             main = project_dir / "input" / f"main{ext}"
             if main.exists():
-                shutil.copy2(str(main), str(exports_dir / f"source{ext}"))
+                _link_or_copy(main, exports_dir / f"source{ext}")
                 exported.append(f"source{ext}")
                 break
 
-    # Copy SRT
+    # Small files — just copy (negligible size)
     srt = project_dir / "captions" / "captions.srt"
     if srt.exists():
         shutil.copy2(str(srt), str(exports_dir / "captions.srt"))
         exported.append("captions.srt")
 
-    # Copy ASS
     ass = project_dir / "captions" / "captions.ass"
     if ass.exists():
         shutil.copy2(str(ass), str(exports_dir / "captions.ass"))
         exported.append("captions.ass")
 
-    # Copy cleaned transcript
     for name in ["edited.json", "cleaned.json"]:
         transcript = project_dir / "transcripts" / name
         if transcript.exists():
@@ -65,7 +79,6 @@ async def create_export_package(req: ExportRequest):
         shutil.copy2(str(cleaned_txt), str(exports_dir / "transcript.txt"))
         exported.append("transcript.txt")
 
-    # Copy metadata
     for name in ["description.txt", "chapters.txt", "tags.txt"]:
         src = project_dir / "metadata" / name
         if src.exists():

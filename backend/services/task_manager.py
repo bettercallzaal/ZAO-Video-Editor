@@ -1,11 +1,19 @@
 """Background task manager. Runs long operations in threads so they
-survive frontend disconnects. Frontend polls for status."""
+survive frontend disconnects. Frontend polls for status.
+
+Task state is persisted to disk so restarts don't lose completed results."""
 
 import threading
 import traceback
 import time
+import json
+import os
 from dataclasses import dataclass, field
 from typing import Optional
+from pathlib import Path
+
+
+TASK_STATE_FILE = Path(__file__).parent.parent.parent / "projects" / ".tasks.json"
 
 
 @dataclass
@@ -25,6 +33,55 @@ class TaskStatus:
 _tasks: dict[str, TaskStatus] = {}
 _lock = threading.Lock()
 _counter = 0
+
+
+def _save_state():
+    """Persist completed/error task states to disk."""
+    try:
+        TASK_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        persistable = {}
+        for tid, t in _tasks.items():
+            if t.status in ("complete", "error"):
+                persistable[tid] = {
+                    "task_id": t.task_id,
+                    "project": t.project,
+                    "operation": t.operation,
+                    "status": t.status,
+                    "progress": t.progress,
+                    "message": t.message,
+                    "result": t.result,
+                    "error": t.error,
+                    "started_at": t.started_at,
+                    "finished_at": t.finished_at,
+                }
+        with open(TASK_STATE_FILE, "w") as f:
+            json.dump(persistable, f, indent=2)
+    except Exception:
+        pass  # Non-critical — don't crash if state can't be saved
+
+
+def _load_state():
+    """Load persisted task states on startup."""
+    global _counter
+    if not TASK_STATE_FILE.exists():
+        return
+    try:
+        with open(TASK_STATE_FILE) as f:
+            data = json.load(f)
+        for tid, d in data.items():
+            _tasks[tid] = TaskStatus(**d)
+        if _tasks:
+            _counter = max(
+                int(tid.rsplit("_", 1)[-1])
+                for tid in _tasks.keys()
+                if tid.rsplit("_", 1)[-1].isdigit()
+            )
+    except Exception:
+        pass
+
+
+# Load on import
+_load_state()
 
 
 def create_task(project: str, operation: str) -> str:
@@ -79,14 +136,30 @@ def run_in_background(task_id: str, fn, *args, **kwargs):
             task.progress = 100
             task.result = result
             task.finished_at = time.time()
+            _save_state()
         except Exception as e:
             traceback.print_exc()
             task.status = "error"
             task.error = str(e)
             task.finished_at = time.time()
+            _save_state()
 
     thread = threading.Thread(target=wrapper, daemon=True)
     thread.start()
+
+
+def cleanup_old_tasks(max_age_hours: int = 24):
+    """Remove completed/error tasks older than max_age_hours."""
+    cutoff = time.time() - (max_age_hours * 3600)
+    with _lock:
+        to_remove = [
+            tid for tid, t in _tasks.items()
+            if t.status in ("complete", "error") and t.finished_at < cutoff
+        ]
+        for tid in to_remove:
+            del _tasks[tid]
+    if to_remove:
+        _save_state()
 
 
 def task_to_dict(task: TaskStatus) -> dict:

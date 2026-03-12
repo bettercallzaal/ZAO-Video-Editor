@@ -71,6 +71,13 @@ async def get_tools():
     return get_available_tools()
 
 
+@app.get("/api/storage")
+async def all_storage():
+    """Get disk usage across all projects."""
+    from .services.storage import get_all_projects_storage
+    return get_all_projects_storage()
+
+
 # Task status polling
 from .services import task_manager as tm
 

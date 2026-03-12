@@ -5,6 +5,10 @@ from datetime import datetime
 from pathlib import Path
 from fastapi import APIRouter, UploadFile, File, HTTPException, Form
 from ..models.schemas import ProjectCreate, ProjectInfo
+from ..services.storage import (
+    get_project_storage, get_all_projects_storage,
+    get_cleanable_files, cleanup_project, verify_file_integrity,
+)
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -233,3 +237,34 @@ async def get_video_url(name: str, stage: str = "source"):
         raise HTTPException(404, "Video not found")
 
     return {"path": str(video), "filename": video.name}
+
+
+# --- Storage endpoints ---
+
+@router.get("/{name}/storage")
+async def project_storage(name: str):
+    """Get disk usage breakdown for a project."""
+    project_dir = get_project_dir(name)
+    if not project_dir.exists():
+        raise HTTPException(404, "Project not found")
+    return get_project_storage(name)
+
+
+@router.get("/{name}/cleanable")
+async def project_cleanable(name: str):
+    """List intermediate files that can be safely removed."""
+    project_dir = get_project_dir(name)
+    if not project_dir.exists():
+        raise HTTPException(404, "Project not found")
+    return get_cleanable_files(name)
+
+
+@router.post("/{name}/cleanup")
+async def project_cleanup(name: str):
+    """Remove all cleanable intermediate files to free disk space."""
+    project_dir = get_project_dir(name)
+    if not project_dir.exists():
+        raise HTTPException(404, "Project not found")
+    return cleanup_project(name)
+
+

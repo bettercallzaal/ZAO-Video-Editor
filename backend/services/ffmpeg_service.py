@@ -127,11 +127,55 @@ def extract_audio(video_path: str, audio_path: str):
         raise RuntimeError(f"ffmpeg audio extraction failed: {result.stderr}")
 
 
-def burn_captions(video_path: str, ass_path: str, output_path: str, style_name: str = "classic"):
-    """Burn captions into video using Pillow-rendered PNG overlays.
+def burn_captions(video_path: str, ass_path: str, output_path: str,
+                  style_name: str = "classic", on_progress=None):
+    """Burn captions into video.
 
-    Supports multiple caption styles including outlines, backgrounds,
-    uppercase, and word-by-word highlighting.
+    Strategy:
+    1. Try ffmpeg's ASS subtitle filter (single-pass, fastest) — needs libass.
+    2. Fall back to Pillow overlay video approach (single-pass, no libass needed).
+
+    on_progress: optional callback(progress_pct: int, message: str)
+    """
+    if not os.path.exists(ass_path):
+        shutil.copy2(video_path, output_path)
+        return
+
+    # Try ASS filter first
+    if _has_ass_filter():
+        if on_progress:
+            on_progress(15, "Burning captions (ASS filter)...")
+        escaped_ass = str(ass_path).replace("\\", "\\\\").replace(":", "\\:")
+        cmd = [
+            "ffmpeg", "-y", "-i", video_path,
+            "-vf", f"ass='{escaped_ass}'",
+            "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+            "-c:a", "copy", "-pix_fmt", "yuv420p",
+            output_path,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            return
+
+    # Fallback: Pillow renders a transparent overlay video, ffmpeg composites in one pass
+    _burn_captions_pillow(video_path, ass_path, output_path, style_name, on_progress)
+
+
+def _has_ass_filter() -> bool:
+    """Check if ffmpeg has the ASS subtitle filter (needs libass)."""
+    result = subprocess.run(
+        ["ffmpeg", "-filters"], capture_output=True, text=True,
+    )
+    return "ass" in result.stdout.split() if result.returncode == 0 else False
+
+
+def _burn_captions_pillow(video_path: str, ass_path: str, output_path: str,
+                          style_name: str = "classic", on_progress=None):
+    """Burn captions using Pillow-rendered overlay frames piped to ffmpeg.
+
+    Generates transparent PNG frames for an overlay video via pipe,
+    then composites with the source video in a single ffmpeg pass.
+    No temp files on disk, no multi-batch re-encoding.
     """
     import tempfile
     from PIL import Image, ImageDraw, ImageFont
@@ -148,10 +192,12 @@ def burn_captions(video_path: str, ass_path: str, output_path: str, style_name: 
     style = get_style(style_name)
     params = get_video_params(video_path)
     width, height = params["width"], params["height"]
+    fps = params["fps"]
+    duration = params["duration"]
+    total_frames = int(duration * fps)
 
     font_path = _find_font(bold=style.get("font_weight") == "bold")
     font_size = max(28, int(height * style["font_size_ratio"]))
-
     try:
         font = ImageFont.truetype(font_path, font_size) if font_path else ImageFont.load_default()
     except Exception:
@@ -169,87 +215,108 @@ def burn_captions(video_path: str, ass_path: str, output_path: str, style_name: 
     corner_radius = style.get("corner_radius", 0)
     word_highlight = style.get("word_highlight", False)
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        render_items = []  # list of (png_path, start, end)
+    # Pre-render unique caption images (much fewer than total frames)
+    # For highlight style: one image per word per caption
+    # For standard: one image per caption
+    caption_images = {}  # key -> PIL Image (RGBA)
 
-        for i, cap in enumerate(captions):
-            cap_text = cap["text"].upper() if uppercase else cap["text"]
+    for i, cap in enumerate(captions):
+        cap_text = cap["text"].upper() if uppercase else cap["text"]
 
-            if word_highlight and "word_timing" in cap and cap["word_timing"]:
-                # Render one PNG per word with that word highlighted
-                for wi, wt in enumerate(cap["word_timing"]):
-                    words_display = []
-                    for wt2 in cap["word_timing"]:
-                        w = wt2["word"].upper() if uppercase else wt2["word"]
-                        words_display.append(w)
-
-                    png_path = os.path.join(tmpdir, f"cap_{i:05d}_w{wi:02d}.png")
-                    _render_highlight_caption(
-                        png_path, width, height, font, words_display, wi,
-                        text_color, highlight_color, outline_color, outline_width,
-                        margin_bottom,
-                    )
-                    render_items.append((png_path, wt["start"], wt["end"]))
-            else:
-                # Standard single-image caption
-                png_path = os.path.join(tmpdir, f"cap_{i:05d}.png")
-                _render_caption(
-                    png_path, width, height, font, cap_text,
-                    text_color, outline_color, outline_width,
-                    bg_color, margin_bottom, pad_x, pad_y, corner_radius,
+        if word_highlight and "word_timing" in cap and cap["word_timing"]:
+            for wi, wt in enumerate(cap["word_timing"]):
+                words_display = []
+                for wt2 in cap["word_timing"]:
+                    w = wt2["word"].upper() if uppercase else wt2["word"]
+                    words_display.append(w)
+                key = f"{i}_w{wi}"
+                caption_images[key] = _render_highlight_image(
+                    width, height, font, words_display, wi,
+                    text_color, highlight_color, outline_color, outline_width,
+                    margin_bottom,
                 )
-                render_items.append((png_path, cap["start"], cap["end"]))
+        else:
+            key = str(i)
+            caption_images[key] = _render_caption_image(
+                width, height, font, cap_text,
+                text_color, outline_color, outline_width,
+                bg_color, margin_bottom, pad_x, pad_y, corner_radius,
+            )
 
-        # Process in batches
-        BATCH_SIZE = 50
-        current_input = video_path
+    # Build a timeline: for each frame, which caption image to show
+    # This is a sorted list of (start_time, end_time, image_key)
+    timeline = []
+    for i, cap in enumerate(captions):
+        if word_highlight and "word_timing" in cap and cap["word_timing"]:
+            for wi, wt in enumerate(cap["word_timing"]):
+                timeline.append((wt["start"], wt["end"], f"{i}_w{wi}"))
+        else:
+            timeline.append((cap["start"], cap["end"], str(i)))
+    timeline.sort()
 
-        for batch_start in range(0, len(render_items), BATCH_SIZE):
-            batch_end = min(batch_start + BATCH_SIZE, len(render_items))
-            batch = render_items[batch_start:batch_end]
-            is_last_batch = batch_end >= len(render_items)
+    # Pipe overlay frames into ffmpeg
+    blank_raw = bytes(width * height * 4)  # transparent RGBA frame
 
-            batch_output = output_path if is_last_batch else os.path.join(tmpdir, f"pass_{batch_start}.mp4")
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", video_path,
+        "-f", "rawvideo", "-pix_fmt", "rgba",
+        "-s", f"{width}x{height}", "-r", str(fps),
+        "-i", "pipe:0",
+        "-filter_complex", "[0:v][1:v]overlay=0:0:format=auto",
+        "-map", "0:a?",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+        "-c:a", "copy", "-pix_fmt", "yuv420p",
+        "-shortest",
+        output_path,
+    ]
 
-            cmd = ["ffmpeg", "-y", "-i", current_input]
-            for png_path, _, _ in batch:
-                cmd.extend(["-i", png_path])
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
 
-            filters = []
-            prev = "0:v"
-            for j, (_, start, end) in enumerate(batch):
-                input_idx = j + 1
-                out_label = f"v{j + 1}"
-                filters.append(
-                    f"[{prev}][{input_idx}:v]overlay=0:0:enable='between(t,{start:.3f},{end:.3f})'[{out_label}]"
-                )
-                prev = out_label
+    if on_progress:
+        on_progress(15, f"Rendering {len(caption_images)} caption overlays...")
 
-            filter_str = ";".join(filters)
+    tl_idx = 0  # current position in timeline
+    last_pct = 0
+    for frame_num in range(total_frames):
+        t = frame_num / fps
 
-            cmd.extend([
-                "-filter_complex", filter_str,
-                "-map", f"[{prev}]",
-                "-map", "0:a?",
-                "-c:v", "libx264", "-preset", "medium", "-crf", "18",
-                "-c:a", "copy",
-                "-pix_fmt", "yuv420p",
-                batch_output,
-            ])
+        # Find which caption image (if any) is active at time t
+        # Advance tl_idx past expired entries
+        while tl_idx < len(timeline) and timeline[tl_idx][1] < t:
+            tl_idx += 1
 
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.returncode != 0:
-                raise RuntimeError(f"ffmpeg caption burn failed: {result.stderr}")
+        active_key = None
+        for j in range(tl_idx, len(timeline)):
+            start, end, key = timeline[j]
+            if start > t:
+                break
+            if start <= t <= end:
+                active_key = key
+                break
 
-            if current_input != video_path and os.path.exists(current_input):
-                os.remove(current_input)
-            current_input = batch_output
+        if active_key and active_key in caption_images:
+            proc.stdin.write(caption_images[active_key].tobytes())
+        else:
+            proc.stdin.write(blank_raw)
+
+        # Report progress every ~5%
+        if on_progress and total_frames > 0:
+            pct = 15 + int(80 * frame_num / total_frames)
+            if pct >= last_pct + 5:
+                last_pct = pct
+                on_progress(pct, f"Burning captions... {pct}%")
+
+    proc.stdin.close()
+    _, stderr = proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg caption burn failed: {stderr.decode()}")
 
 
-def _render_caption(png_path, width, height, font, text,
-                    text_color, outline_color, outline_width,
-                    bg_color, margin_bottom, pad_x, pad_y, corner_radius):
-    """Render a single caption as a transparent PNG."""
+def _render_caption_image(width, height, font, text,
+                          text_color, outline_color, outline_width,
+                          bg_color, margin_bottom, pad_x, pad_y, corner_radius):
+    """Render a single caption as a transparent RGBA PIL Image."""
     from PIL import Image, ImageDraw
 
     img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
@@ -259,7 +326,6 @@ def _render_caption(png_path, width, height, font, text,
     tw = bbox[2] - bbox[0]
     th = bbox[3] - bbox[1]
 
-    # Position: centered horizontally, offset from bottom
     if bg_color:
         box_w = tw + pad_x * 2
         box_h = th + pad_y * 2
@@ -267,7 +333,6 @@ def _render_caption(png_path, width, height, font, text,
         box_y = height - margin_bottom - box_h
         text_x = box_x + pad_x
         text_y = box_y + pad_y
-
         draw.rounded_rectangle(
             [box_x, box_y, box_x + box_w, box_y + box_h],
             radius=corner_radius, fill=bg_color,
@@ -276,19 +341,17 @@ def _render_caption(png_path, width, height, font, text,
         text_x = (width - tw) // 2
         text_y = height - margin_bottom - th
 
-    # Draw outline by rendering text at offsets
     if outline_color and outline_width > 0:
         _draw_text_outline(draw, text_x, text_y, text, font, outline_color, outline_width)
 
-    # Draw main text
     draw.text((text_x, text_y), text, font=font, fill=text_color)
-    img.save(png_path)
+    return img
 
 
-def _render_highlight_caption(png_path, width, height, font, words, active_idx,
-                              inactive_color, active_color, outline_color,
-                              outline_width, margin_bottom):
-    """Render a caption with one word highlighted in a different color."""
+def _render_highlight_image(width, height, font, words, active_idx,
+                            inactive_color, active_color, outline_color,
+                            outline_width, margin_bottom):
+    """Render a caption with one word highlighted as a transparent RGBA PIL Image."""
     from PIL import Image, ImageDraw
 
     img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
@@ -302,11 +365,9 @@ def _render_highlight_caption(png_path, width, height, font, words, active_idx,
     start_x = (width - tw) // 2
     text_y = height - margin_bottom - th
 
-    # Draw outline for full text first
     if outline_color and outline_width > 0:
         _draw_text_outline(draw, start_x, text_y, full_text, font, outline_color, outline_width)
 
-    # Draw each word individually with appropriate color
     x = start_x
     for i, word in enumerate(words):
         color = active_color if i == active_idx else inactive_color
@@ -314,7 +375,7 @@ def _render_highlight_caption(png_path, width, height, font, words, active_idx,
         word_w = draw.textbbox((0, 0), word + " ", font=font)[2]
         x += word_w
 
-    img.save(png_path)
+    return img
 
 
 def _draw_text_outline(draw, x, y, text, font, color, width):
@@ -337,36 +398,26 @@ def _hex_to_rgba(hex_color: str, alpha: int = 255) -> tuple:
 
 
 def _find_font(bold: bool = True) -> str:
-    """Find a suitable font for caption rendering. Prefers bold fonts."""
+    """Find a suitable font for caption rendering."""
     if bold:
         bold_candidates = [
-            # Montserrat (if user installed it)
             os.path.expanduser("~/Library/Fonts/Montserrat-Bold.ttf"),
             os.path.expanduser("~/Library/Fonts/Montserrat-ExtraBold.ttf"),
-            os.path.expanduser("~/Library/Fonts/Montserrat-Black.ttf"),
             "/Library/Fonts/Montserrat-Bold.ttf",
-            "/Library/Fonts/Montserrat-ExtraBold.ttf",
-            # Arial Bold
             "/Library/Fonts/Arial Bold.ttf",
             "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-            # Helvetica Bold
             "/System/Library/Fonts/Helvetica Bold.ttc",
             "/System/Library/Fonts/HelveticaNeue.ttc",
-            # SF Pro Bold
             "/System/Library/Fonts/SFNS.ttf",
-            "/System/Library/Fonts/SFNSText.ttf",
         ]
         for path in bold_candidates:
             if os.path.exists(path):
                 return path
-
-    # Regular fallbacks
     candidates = [
         "/System/Library/Fonts/Helvetica.ttc",
         "/System/Library/Fonts/SFNS.ttf",
         "/Library/Fonts/Arial.ttf",
         "/System/Library/Fonts/Supplemental/Arial.ttf",
-        "/System/Library/Fonts/Supplemental/Helvetica.ttc",
     ]
     for path in candidates:
         if os.path.exists(path):
