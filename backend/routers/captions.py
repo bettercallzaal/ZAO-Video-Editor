@@ -3,7 +3,8 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from ..models.schemas import CaptionRequest, BurnCaptionRequest
 from ..services.caption_gen import (
-    generate_captions_from_segments, generate_srt, generate_ass, save_captions,
+    generate_captions_from_segments, generate_srt, generate_ass,
+    save_captions, STYLES,
 )
 from ..services.ffmpeg_service import get_video_params, burn_captions
 from ..services.whisper_service import load_transcript
@@ -33,6 +34,15 @@ def find_source_video(project_dir: Path) -> Path:
     raise HTTPException(404, "No video found")
 
 
+@router.get("/styles")
+async def list_styles():
+    """List available caption styles with descriptions."""
+    return {
+        key: {"name": s["name"], "description": s["description"]}
+        for key, s in STYLES.items()
+    }
+
+
 @router.post("/generate")
 async def generate(req: CaptionRequest):
     """Generate captions from transcript."""
@@ -40,13 +50,15 @@ async def generate(req: CaptionRequest):
     if not project_dir.exists():
         raise HTTPException(404, "Project not found")
 
+    style = req.style.value
+
     transcript = get_best_transcript(project_dir)
-    captions = generate_captions_from_segments(transcript["segments"])
+    captions = generate_captions_from_segments(transcript["segments"], style=style)
 
     captions_dir = project_dir / "captions"
     save_captions(captions, str(captions_dir / "captions.json"))
 
-    srt_content = generate_srt(captions)
+    srt_content = generate_srt(captions, style=style)
     with open(captions_dir / "captions.srt", "w") as f:
         f.write(srt_content)
 
@@ -54,17 +66,23 @@ async def generate(req: CaptionRequest):
     params = get_video_params(str(video_path))
     ass_content = generate_ass(
         captions,
-        theme=req.theme.value,
+        style=style,
         video_width=params["width"],
         video_height=params["height"],
     )
     with open(captions_dir / "captions.ass", "w") as f:
         f.write(ass_content)
 
+    # Save the style name for burn to use
+    with open(captions_dir / "style.txt", "w") as f:
+        f.write(style)
+
+    style_info = STYLES.get(style, {})
     return {
         "status": "complete",
         "caption_count": len(captions),
-        "theme": req.theme.value,
+        "style": style,
+        "style_name": style_info.get("name", style),
     }
 
 
@@ -95,28 +113,74 @@ async def get_ass(project_name: str):
         return {"content": f.read()}
 
 
-def _do_burn(task_id: str, project_dir: Path):
-    """Background caption burn worker."""
+def _find_burn_video(project_dir: Path) -> Path:
+    """Find the best source video for caption burning."""
+    # Prefer trimmed (silence-removed) over assembled over raw
+    for candidate in [
+        project_dir / "processing" / "trimmed.mp4",
+        project_dir / "processing" / "assembled.mp4",
+    ]:
+        if candidate.exists():
+            return candidate
+    for ext in [".mp4", ".mov", ".mkv", ".webm"]:
+        p = project_dir / "input" / f"main{ext}"
+        if p.exists():
+            return p
+    raise RuntimeError("No video found")
+
+
+def _do_burn(task_id: str, project_dir: Path, renderer: str):
+    """Background caption burn worker with multi-renderer support."""
     tm.update_task(task_id, progress=5, message="Preparing to burn captions...")
 
     ass_path = project_dir / "captions" / "captions.ass"
+    captions_json = project_dir / "captions" / "captions.json"
     if not ass_path.exists():
         raise RuntimeError("ASS captions not found. Generate captions first.")
 
-    video_path = project_dir / "processing" / "assembled.mp4"
-    if not video_path.exists():
-        for ext in [".mp4", ".mov", ".mkv", ".webm"]:
-            p = project_dir / "input" / f"main{ext}"
-            if p.exists():
-                video_path = p
-                break
+    style_path = project_dir / "captions" / "style.txt"
+    style_name = "classic"
+    if style_path.exists():
+        style_name = style_path.read_text().strip()
 
+    video_path = _find_burn_video(project_dir)
     output_path = project_dir / "processing" / "captioned.mp4"
 
-    tm.update_task(task_id, progress=10, message="Rendering captions onto video...")
-    burn_captions(str(video_path), str(ass_path), str(output_path))
+    # Resolve renderer
+    actual_renderer = _resolve_renderer(renderer)
 
-    return {"output": str(output_path)}
+    tm.update_task(task_id, progress=10,
+                   message=f"Rendering captions ({actual_renderer})...")
+
+    if actual_renderer == "moviepy":
+        from ..services.moviepy_service import burn_captions_moviepy
+        burn_captions_moviepy(
+            str(video_path), str(captions_json), str(output_path),
+            style_name=style_name,
+            on_progress=lambda p, m: tm.update_task(task_id, progress=p, message=m),
+        )
+    else:
+        burn_captions(
+            str(video_path), str(ass_path), str(output_path),
+            style_name=style_name,
+        )
+
+    return {"output": str(output_path), "renderer": actual_renderer}
+
+
+def _resolve_renderer(renderer: str) -> str:
+    """Resolve 'auto' renderer to best available."""
+    from ..services.tool_availability import check_tool
+
+    if renderer == "auto":
+        if check_tool("moviepy"):
+            return "moviepy"
+        return "pillow"
+    elif renderer == "moviepy":
+        if not check_tool("moviepy"):
+            return "pillow"
+        return "moviepy"
+    return "pillow"
 
 
 @router.post("/burn")
@@ -131,5 +195,5 @@ async def burn(req: BurnCaptionRequest):
         return tm.task_to_dict(existing)
 
     task_id = tm.create_task(req.project_name, "burn")
-    tm.run_in_background(task_id, _do_burn, project_dir)
+    tm.run_in_background(task_id, _do_burn, project_dir, req.renderer)
     return tm.task_to_dict(tm.get_task(task_id))

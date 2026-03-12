@@ -1,8 +1,9 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import ProgressBar from './ProgressBar';
 import {
   uploadMainVideo, uploadIntro, uploadOutro,
   assembleVideo, transcribe, pollTask,
+  getAvailableTools, previewSilenceCuts, removeSilence,
 } from '../api/client';
 
 export default function UploadPanel({ projectName, stages, onComplete }) {
@@ -18,9 +19,21 @@ export default function UploadPanel({ projectName, stages, onComplete }) {
   const [substeps, setSubsteps] = useState([]);
   const [error, setError] = useState('');
   const [quality, setQuality] = useState('standard');
+  const [engine, setEngine] = useState('auto');
+  const [refineTimestamps, setRefineTimestamps] = useState(true);
+  const [tools, setTools] = useState({});
+  const [silenceMargin, setSilenceMargin] = useState(0.1);
+  const [silenceThreshold, setSilenceThreshold] = useState(0.04);
+  const [silencePreview, setSilencePreview] = useState(null);
+  const [removeSilenceEnabled, setRemoveSilenceEnabled] = useState(false);
   const mainRef = useRef(null);
   const introRef = useRef(null);
   const outroRef = useRef(null);
+
+  // Load available tools on mount
+  useEffect(() => {
+    getAvailableTools().then(setTools).catch(() => {});
+  }, []);
 
   const updateStep = (steps, activeIndex) => {
     setSubsteps(steps.map((label, i) => ({
@@ -77,34 +90,73 @@ export default function UploadPanel({ projectName, stages, onComplete }) {
     }
   };
 
+  const handlePreviewSilence = async () => {
+    setError('');
+    setProgressStatus('Previewing silence cuts...');
+    setProgress(30);
+    try {
+      const data = await previewSilenceCuts(projectName, silenceMargin, silenceThreshold);
+      setSilencePreview(data);
+      setProgress(100);
+      setProgressStatus(`Found ${data.cut_count} silent sections (${data.removed_seconds}s)`);
+    } catch (e) {
+      setError(e.message);
+      setProgress(0);
+    }
+  };
+
   const handleProcess = async () => {
     setProcessing(true);
     setError('');
     setProgress(0);
 
-    const steps = ['Assemble video + extract audio', 'Transcribe audio'];
+    const steps = ['Assemble video + extract audio'];
+    if (removeSilenceEnabled && tools.auto_editor) {
+      steps.push('Remove dead air');
+    }
+    steps.push('Transcribe audio');
+    if (refineTimestamps && tools.stable_ts) {
+      // Refinement is part of transcription step
+    }
 
     try {
-      // Step 1: Assemble (background task)
-      updateStep(steps, 0);
+      let stepIdx = 0;
+
+      // Step 1: Assemble
+      updateStep(steps, stepIdx);
       setProgress(5);
       setProgressStatus('Assembling video...');
       const assembleTask = await assembleVideo(projectName, useIntro && introUploaded, useOutro && outroUploaded);
 
       await pollTask(assembleTask.task_id, (t) => {
-        setProgress(5 + (t.progress / 100) * 25);
+        setProgress(5 + (t.progress / 100) * 20);
         if (t.message) setProgressStatus(t.message);
       });
-      setProgress(30);
+      setProgress(25);
+      stepIdx++;
 
-      // Step 2: Transcribe (background task)
-      updateStep(steps, 1);
+      // Step 2 (optional): Remove silence
+      if (removeSilenceEnabled && tools.auto_editor) {
+        updateStep(steps, stepIdx);
+        setProgressStatus('Removing dead air...');
+        const silenceTask = await removeSilence(projectName, silenceMargin, silenceThreshold);
+
+        await pollTask(silenceTask.task_id, (t) => {
+          setProgress(25 + (t.progress / 100) * 10);
+          if (t.message) setProgressStatus(t.message);
+        });
+        setProgress(35);
+        stepIdx++;
+      }
+
+      // Step 3: Transcribe
+      updateStep(steps, stepIdx);
+      const baseProgress = removeSilenceEnabled && tools.auto_editor ? 35 : 25;
       setProgressStatus('Starting transcription...');
-      const transcribeTask = await transcribe(projectName, quality);
+      const transcribeTask = await transcribe(projectName, quality, engine, refineTimestamps);
 
       await pollTask(transcribeTask.task_id, (t) => {
-        // Map transcription progress into 30-95 range
-        const mapped = 30 + (t.progress / 100) * 65;
+        const mapped = baseProgress + (t.progress / 100) * (95 - baseProgress);
         setProgress(Math.min(mapped, 95));
         if (t.message) setProgressStatus(t.message);
       });
@@ -112,8 +164,13 @@ export default function UploadPanel({ projectName, stages, onComplete }) {
       setProgress(100);
       const finalTask = await pollTask(transcribeTask.task_id, null, 100);
       const r = finalTask.result || {};
-      setProgressStatus(`Done! ${r.segments || '?'} segments, language: ${r.language || '?'}`);
-      updateStep(steps, 2);
+
+      let doneMsg = `Done! ${r.segments || '?'} segments, language: ${r.language || '?'}`;
+      if (r.engine) doneMsg += `, engine: ${r.engine}`;
+      if (r.timestamp_refined) doneMsg += ' (timestamps refined)';
+      setProgressStatus(doneMsg);
+
+      updateStep(steps, steps.length);
       onComplete();
     } catch (e) {
       setError(`Processing failed: ${e.message}`);
@@ -121,6 +178,12 @@ export default function UploadPanel({ projectName, stages, onComplete }) {
     } finally {
       setProcessing(false);
     }
+  };
+
+  const engineLabel = (e) => {
+    if (e === 'auto') return tools.whisperx ? 'Auto (WhisperX)' : 'Auto (faster-whisper)';
+    if (e === 'whisperx') return 'WhisperX';
+    return 'faster-whisper';
   };
 
   return (
@@ -183,9 +246,66 @@ export default function UploadPanel({ projectName, stages, onComplete }) {
         </div>
       </section>
 
-      {/* Transcription quality + Process button */}
+      {/* Processing options */}
       {stages.upload === 'complete' && !processing && (
-        <section className="space-y-3">
+        <section className="space-y-4">
+          {/* Silence removal (auto-editor) */}
+          {tools.auto_editor && (
+            <div className="bg-[#1a1f2e] rounded-lg p-3 space-y-2">
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={removeSilenceEnabled}
+                  onChange={(e) => setRemoveSilenceEnabled(e.target.checked)}
+                  className="rounded"
+                />
+                <span className="text-sm text-gray-300 font-medium">Remove Dead Air</span>
+                <span className="text-xs text-gray-500">(auto-editor)</span>
+              </label>
+              {removeSilenceEnabled && (
+                <div className="ml-6 space-y-2">
+                  <div className="flex gap-4">
+                    <div>
+                      <label className="text-xs text-gray-500 block mb-1">Padding (sec)</label>
+                      <input
+                        type="number" step="0.05" min="0" max="1"
+                        value={silenceMargin}
+                        onChange={(e) => setSilenceMargin(+e.target.value)}
+                        className="w-20 bg-[#0f1419] border border-gray-700 rounded px-2 py-1 text-sm text-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-500 block mb-1">Threshold</label>
+                      <input
+                        type="number" step="0.01" min="0.01" max="0.2"
+                        value={silenceThreshold}
+                        onChange={(e) => setSilenceThreshold(+e.target.value)}
+                        className="w-20 bg-[#0f1419] border border-gray-700 rounded px-2 py-1 text-sm text-white"
+                      />
+                    </div>
+                    <div className="self-end">
+                      <button
+                        onClick={handlePreviewSilence}
+                        className="text-xs bg-gray-700 text-gray-300 px-3 py-1.5 rounded hover:bg-gray-600"
+                      >
+                        Preview Cuts
+                      </button>
+                    </div>
+                  </div>
+                  {silencePreview && (
+                    <div className="text-xs text-gray-400 bg-[#0f1419] rounded p-2">
+                      <p>{silencePreview.cut_count} silent sections found</p>
+                      <p>Original: {silencePreview.original_duration}s → Trimmed: {silencePreview.edited_duration}s
+                        <span className="text-[#e0ddaa] ml-1">(-{silencePreview.removed_seconds}s)</span>
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Transcription quality */}
           <div>
             <h3 className="text-sm font-medium text-gray-300 mb-2">Transcription Quality</h3>
             <div className="flex gap-3">
@@ -214,10 +334,43 @@ export default function UploadPanel({ projectName, stages, onComplete }) {
               ))}
             </div>
           </div>
+
+          {/* Engine + refinement options */}
+          <div className="flex gap-4 items-start">
+            <div>
+              <label className="text-xs text-gray-500 block mb-1">Engine</label>
+              <select
+                value={engine}
+                onChange={(e) => setEngine(e.target.value)}
+                className="bg-[#1a1f2e] border border-gray-700 rounded px-2 py-1.5 text-sm text-white"
+              >
+                <option value="auto">{engineLabel('auto')}</option>
+                <option value="faster-whisper">faster-whisper</option>
+                {tools.whisperx && <option value="whisperx">WhisperX (better word timing)</option>}
+              </select>
+            </div>
+            {tools.stable_ts && (
+              <label className="flex items-center gap-2 pt-5">
+                <input
+                  type="checkbox"
+                  checked={refineTimestamps}
+                  onChange={(e) => setRefineTimestamps(e.target.checked)}
+                  className="rounded"
+                />
+                <span className="text-sm text-gray-400">Refine timestamps</span>
+                <span className="text-xs text-gray-600">(stable-ts)</span>
+              </label>
+            )}
+          </div>
+
           <button onClick={handleProcess} className="w-full bg-[#e0ddaa] text-[#141e27] py-3 rounded-lg font-medium hover:bg-[#d4d19e]">
-            Assemble + Transcribe
+            {removeSilenceEnabled ? 'Assemble + Trim + Transcribe' : 'Assemble + Transcribe'}
           </button>
-          <p className="text-xs text-gray-500 mt-1">Assembles video, extracts audio, and runs local transcription.</p>
+          <p className="text-xs text-gray-500 mt-1">
+            {removeSilenceEnabled
+              ? 'Assembles video, removes dead air, extracts audio, and runs local transcription.'
+              : 'Assembles video, extracts audio, and runs local transcription.'}
+          </p>
         </section>
       )}
 

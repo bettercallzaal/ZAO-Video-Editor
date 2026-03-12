@@ -1,10 +1,100 @@
 import { useState, useEffect } from 'react';
 import ProgressBar from './ProgressBar';
-import { generateCaptions, getCaptions, burnCaptions, getSrt, getAss, pollTask } from '../api/client';
+import { generateCaptions, getCaptions, burnCaptions, getSrt, getAss, pollTask, getAvailableTools } from '../api/client';
+
+const CAPTION_STYLES = [
+  {
+    id: 'classic',
+    name: 'Classic',
+    description: 'Clean white text with black outline',
+    preview: { text: '#FFFFFF', outline: '#000000', bg: null, uppercase: false },
+  },
+  {
+    id: 'box',
+    name: 'Box',
+    description: 'White text on dark semi-transparent box',
+    preview: { text: '#FFFFFF', outline: null, bg: 'rgba(0,0,0,0.7)', uppercase: false },
+  },
+  {
+    id: 'bold_pop',
+    name: 'Bold Pop',
+    description: 'Large bold uppercase with thick outline',
+    preview: { text: '#FFFFFF', outline: '#000000', bg: null, uppercase: true },
+  },
+  {
+    id: 'highlight',
+    name: 'Highlight',
+    description: 'Word-by-word highlight (Hormozi style)',
+    preview: { text: '#666666', outline: '#000000', bg: null, uppercase: true, highlight: '#FFFFFF' },
+  },
+  {
+    id: 'brand_light',
+    name: 'Brand Light',
+    description: 'Dark text on beige background',
+    preview: { text: '#141e27', outline: null, bg: '#e0ddaa', uppercase: false },
+  },
+  {
+    id: 'brand_dark',
+    name: 'Brand Dark',
+    description: 'Beige text on dark background',
+    preview: { text: '#e0ddaa', outline: null, bg: '#141e27', uppercase: false },
+  },
+];
+
+function StylePreview({ style, selected, onSelect }) {
+  const p = style.preview;
+  const sampleWords = p.uppercase ? 'THIS IS HOW' : 'This is how';
+
+  return (
+    <button
+      onClick={() => onSelect(style.id)}
+      className={`text-left p-3 rounded-lg border-2 transition-all ${
+        selected
+          ? 'border-[#e0ddaa] bg-[#1a1f2e]'
+          : 'border-gray-700/50 bg-[#0f1419] hover:border-gray-600'
+      }`}
+    >
+      {/* Mini preview */}
+      <div className="bg-gray-900 rounded h-14 flex items-end justify-center pb-2 mb-2 relative overflow-hidden">
+        {/* Fake video frame lines */}
+        <div className="absolute inset-0 opacity-20">
+          <div className="absolute top-3 left-3 right-6 h-1 bg-gray-600 rounded" />
+          <div className="absolute top-6 left-3 right-10 h-1 bg-gray-600 rounded" />
+        </div>
+
+        <span
+          className="text-xs font-bold relative z-10 px-1.5 py-0.5 rounded"
+          style={{
+            color: p.text,
+            backgroundColor: p.bg || 'transparent',
+            textShadow: p.outline
+              ? `1px 1px 0 ${p.outline}, -1px -1px 0 ${p.outline}, 1px -1px 0 ${p.outline}, -1px 1px 0 ${p.outline}`
+              : 'none',
+          }}
+        >
+          {p.highlight ? (
+            <>
+              <span style={{ color: p.text }}>THIS </span>
+              <span style={{ color: p.highlight }}>IS </span>
+              <span style={{ color: p.text }}>HOW</span>
+            </>
+          ) : (
+            sampleWords
+          )}
+        </span>
+      </div>
+
+      <p className="text-sm font-medium text-gray-200">{style.name}</p>
+      <p className="text-xs text-gray-500 mt-0.5">{style.description}</p>
+    </button>
+  );
+}
 
 export default function CaptionPanel({ projectName, stages, onComplete }) {
   const [captions, setCaptions] = useState([]);
-  const [theme, setTheme] = useState('theme_a');
+  const [style, setStyle] = useState('classic');
+  const [renderer, setRenderer] = useState('auto');
+  const [tools, setTools] = useState({});
   const [processing, setProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
   const [progressStatus, setProgressStatus] = useState('');
@@ -26,18 +116,23 @@ export default function CaptionPanel({ projectName, stages, onComplete }) {
     if (stages.captions === 'complete') loadCaptions();
   }, [stages.captions]);
 
+  useEffect(() => {
+    getAvailableTools().then(setTools).catch(() => {});
+  }, []);
+
   const handleGenerate = async () => {
     setProcessing(true);
     setError('');
     setProgress(10);
-    setProgressStatus('Generating captions from transcript...');
+    const styleName = CAPTION_STYLES.find(s => s.id === style)?.name || style;
+    setProgressStatus(`Generating captions (${styleName})...`);
     setSubsteps([
       { label: 'Generate captions + SRT + ASS', status: 'active' },
     ]);
     try {
-      const result = await generateCaptions(projectName, theme);
+      const result = await generateCaptions(projectName, style);
       setProgress(100);
-      setProgressStatus(`Generated ${result.caption_count} captions (${theme === 'theme_a' ? 'Dark on Light' : 'Light on Dark'})`);
+      setProgressStatus(`Generated ${result.caption_count} captions — ${result.style_name}`);
       setSubsteps([{ label: 'Generate captions + SRT + ASS', status: 'complete' }]);
       await loadCaptions();
       onComplete();
@@ -59,7 +154,7 @@ export default function CaptionPanel({ projectName, stages, onComplete }) {
     ]);
 
     try {
-      const task = await burnCaptions(projectName, theme);
+      const task = await burnCaptions(projectName, style, renderer);
 
       await pollTask(task.task_id, (t) => {
         setProgress(t.progress);
@@ -108,32 +203,36 @@ export default function CaptionPanel({ projectName, stages, onComplete }) {
 
   return (
     <div className="space-y-4">
-      {/* Theme selection */}
+      {/* Style selection */}
       <div>
-        <h3 className="text-sm font-medium text-gray-300 mb-2">Caption Theme</h3>
-        <div className="flex gap-3">
-          <label
-            className={`flex items-center gap-2 p-3 rounded border cursor-pointer ${
-              theme === 'theme_a' ? 'border-[#e0ddaa]' : 'border-gray-700'
-            }`}
-          >
-            <input type="radio" value="theme_a" checked={theme === 'theme_a'} onChange={() => setTheme('theme_a')} />
-            <span className="inline-block px-2 py-0.5 rounded text-xs" style={{ background: '#e0ddaa', color: '#141e27' }}>
-              Dark on Light
-            </span>
-          </label>
-          <label
-            className={`flex items-center gap-2 p-3 rounded border cursor-pointer ${
-              theme === 'theme_b' ? 'border-[#e0ddaa]' : 'border-gray-700'
-            }`}
-          >
-            <input type="radio" value="theme_b" checked={theme === 'theme_b'} onChange={() => setTheme('theme_b')} />
-            <span className="inline-block px-2 py-0.5 rounded text-xs" style={{ background: '#141e27', color: '#e0ddaa', border: '1px solid #e0ddaa' }}>
-              Light on Dark
-            </span>
-          </label>
+        <h3 className="text-sm font-medium text-gray-300 mb-2">Caption Style</h3>
+        <div className="grid grid-cols-3 gap-2">
+          {CAPTION_STYLES.map((s) => (
+            <StylePreview
+              key={s.id}
+              style={s}
+              selected={style === s.id}
+              onSelect={setStyle}
+            />
+          ))}
         </div>
       </div>
+
+      {/* Renderer selection */}
+      {(tools.moviepy || tools.pycaps) && (
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-gray-500">Renderer:</span>
+          <select
+            value={renderer}
+            onChange={(e) => setRenderer(e.target.value)}
+            className="bg-[#1a1f2e] border border-gray-700 rounded px-2 py-1 text-sm text-white"
+          >
+            <option value="auto">Auto{tools.moviepy ? ' (MoviePy)' : ' (Pillow)'}</option>
+            <option value="pillow">Pillow (default)</option>
+            {tools.moviepy && <option value="moviepy">MoviePy (single-pass)</option>}
+          </select>
+        </div>
+      )}
 
       {/* Actions */}
       {!processing && (

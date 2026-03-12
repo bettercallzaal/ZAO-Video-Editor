@@ -33,6 +33,8 @@ class AssemblyRequest(BaseModel):
 class TranscriptionRequest(BaseModel):
     project_name: str
     model_size: str = "base"
+    engine: str = "auto"           # "faster-whisper", "whisperx", "auto"
+    refine_timestamps: bool = True  # use stable-ts if available
 
 
 class TranscriptSegment(BaseModel):
@@ -53,19 +55,24 @@ class DictionaryEntry(BaseModel):
     correct: str
 
 
-class CaptionTheme(str, Enum):
-    THEME_A = "theme_a"
-    THEME_B = "theme_b"
+class CaptionStyle(str, Enum):
+    CLASSIC = "classic"
+    BOX = "box"
+    BOLD_POP = "bold_pop"
+    HIGHLIGHT = "highlight"
+    BRAND_LIGHT = "brand_light"
+    BRAND_DARK = "brand_dark"
 
 
 class CaptionRequest(BaseModel):
     project_name: str
-    theme: CaptionTheme = CaptionTheme.THEME_A
+    style: CaptionStyle = CaptionStyle.CLASSIC
 
 
 class BurnCaptionRequest(BaseModel):
     project_name: str
-    theme: CaptionTheme = CaptionTheme.THEME_A
+    style: CaptionStyle = CaptionStyle.CLASSIC
+    renderer: str = "auto"  # "pillow", "moviepy", "auto"
 
 
 class MetadataRequest(BaseModel):

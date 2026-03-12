@@ -92,11 +92,19 @@ export const assembleVideo = (projectName, useIntro = false, useOutro = false) =
 export const extractAudio = (projectName) =>
   request(`/assembly/extract-audio?project_name=${encodeURIComponent(projectName)}`, { method: 'POST' });
 
+// --- Tools availability ---
+export const getAvailableTools = () => request('/tools');
+
 // --- Transcription (background task) ---
-export const transcribe = (projectName, quality = 'standard') =>
+export const transcribe = (projectName, quality = 'standard', engine = 'auto', refineTimestamps = true) =>
   request('/transcription/transcribe', {
     method: 'POST',
-    body: JSON.stringify({ project_name: projectName, model_size: quality }),
+    body: JSON.stringify({
+      project_name: projectName,
+      model_size: quality,
+      engine,
+      refine_timestamps: refineTimestamps,
+    }),
   });
 
 export const getRawTranscript = (projectName) =>
@@ -137,10 +145,12 @@ export const removeDictEntry = (wrong) =>
   request(`/transcript/dictionary/${encodeURIComponent(wrong)}`, { method: 'DELETE' });
 
 // --- Captions ---
-export const generateCaptions = (projectName, theme = 'theme_a') =>
+export const getCaptionStyles = () => request('/captions/styles');
+
+export const generateCaptions = (projectName, style = 'classic') =>
   request('/captions/generate', {
     method: 'POST',
-    body: JSON.stringify({ project_name: projectName, theme }),
+    body: JSON.stringify({ project_name: projectName, style }),
   });
 
 export const getCaptions = (projectName) =>
@@ -153,10 +163,23 @@ export const getAss = (projectName) =>
   request(`/captions/${encodeURIComponent(projectName)}/ass`);
 
 // Burn captions (background task)
-export const burnCaptions = (projectName, theme = 'theme_a') =>
+export const burnCaptions = (projectName, style = 'classic', renderer = 'auto') =>
   request('/captions/burn', {
     method: 'POST',
-    body: JSON.stringify({ project_name: projectName, theme }),
+    body: JSON.stringify({ project_name: projectName, style, renderer }),
+  });
+
+// --- Silence removal (auto-editor) ---
+export const previewSilenceCuts = (projectName, margin = 0.1, threshold = 0.04) =>
+  request('/silence/preview', {
+    method: 'POST',
+    body: JSON.stringify({ project_name: projectName, margin, threshold }),
+  });
+
+export const removeSilence = (projectName, margin = 0.1, threshold = 0.04) =>
+  request('/silence/remove', {
+    method: 'POST',
+    body: JSON.stringify({ project_name: projectName, margin, threshold }),
   });
 
 // --- Metadata ---

@@ -5,7 +5,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from pathlib import Path
 
-from .routers import projects, assembly, transcription, transcript, captions, metadata, export, speakers, fillers, clips
+from .routers import projects, assembly, transcription, transcript, captions, metadata, export, speakers, fillers, clips, silence
 
 app = FastAPI(title="ZAO Video Editor", version="0.1.0")
 
@@ -40,6 +40,7 @@ app.include_router(export.router)
 app.include_router(speakers.router)
 app.include_router(fillers.router)
 app.include_router(clips.router)
+app.include_router(silence.router)
 
 # Serve video files from projects directory
 PROJECTS_DIR = Path(__file__).parent.parent / "projects"
@@ -60,7 +61,14 @@ async def serve_video(project_name: str, subpath: str):
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "version": "0.1.0"}
+    return {"status": "ok", "version": "0.2.0"}
+
+
+@app.get("/api/tools")
+async def get_tools():
+    """Return which optional tools are installed."""
+    from .services.tool_availability import get_available_tools
+    return get_available_tools()
 
 
 # Task status polling
