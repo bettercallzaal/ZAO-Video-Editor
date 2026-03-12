@@ -276,3 +276,44 @@ export const listClips = (projectName) =>
 
 export const getClipDownloadUrl = (projectName, filename) =>
   `${BASE}/clips/${encodeURIComponent(projectName)}/download/${encodeURIComponent(filename)}`;
+
+// --- AI Tools: Tier 1 (CPU) ---
+export const upscaleVideo = (projectName, scale = 2) =>
+  request('/ai/upscale', { method: 'POST', body: JSON.stringify({ project_name: projectName, scale }) });
+
+export const removeBackground = (projectName, bgColor = '#00FF00', model = 'u2net') =>
+  request('/ai/remove-background', { method: 'POST', body: JSON.stringify({ project_name: projectName, bg_color: bgColor, model }) });
+
+export const detectScenes = (projectName, threshold = 27.0) =>
+  request('/ai/detect-scenes', { method: 'POST', body: JSON.stringify({ project_name: projectName, threshold }) });
+
+export const enhanceAudio = (projectName) =>
+  request('/ai/enhance-audio', { method: 'POST', body: JSON.stringify({ project_name: projectName }) });
+
+export const generateThumbnails = (projectName, count = 5) =>
+  request('/ai/thumbnails', { method: 'POST', body: JSON.stringify({ project_name: projectName, count }) });
+
+export const listThumbnails = (projectName) =>
+  request(`/ai/thumbnails/${encodeURIComponent(projectName)}`);
+
+export const getThumbnailUrl = (projectName, filename) =>
+  `${BASE}/serve-video/${encodeURIComponent(projectName)}/exports/thumbnails/${encodeURIComponent(filename)}`;
+
+// --- AI Tools: Tier 2 (GPU) ---
+export const generateVideo = (projectName, prompt, duration = 6, width = 768, height = 512) =>
+  request('/ai/generate-video', { method: 'POST', body: JSON.stringify({ project_name: projectName, prompt, duration, width, height }) });
+
+export const generateBroll = (projectName, prompt, duration = 6, count = 3) =>
+  request('/ai/generate-broll', { method: 'POST', body: JSON.stringify({ project_name: projectName, prompt, duration, count }) });
+
+export const textToSpeech = (projectName, text, language = 'en', speakerWav = null) =>
+  request('/ai/text-to-speech', { method: 'POST', body: JSON.stringify({ project_name: projectName, text, language, speaker_wav: speakerWav }) });
+
+export const generateMusic = (projectName, prompt, duration = 30, modelSize = 'small') =>
+  request('/ai/generate-music', { method: 'POST', body: JSON.stringify({ project_name: projectName, prompt, duration, model_size: modelSize }) });
+
+export const mixMusic = (projectName, volume = 0.15) =>
+  request('/ai/mix-music', { method: 'POST', body: JSON.stringify({ project_name: projectName, volume }) });
+
+export const generateAiThumbnail = (projectName, prompt) =>
+  request('/ai/ai-thumbnail', { method: 'POST', body: JSON.stringify({ project_name: projectName, prompt }) });

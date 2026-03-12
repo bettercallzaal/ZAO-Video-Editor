@@ -28,6 +28,46 @@ def check_tool(name: str) -> bool:
         elif name == "moviepy":
             from moviepy import VideoFileClip  # noqa: F401
             available = True
+
+        # --- Tier 1: CPU-friendly tools ---
+        elif name == "realesrgan":
+            import subprocess
+            result = subprocess.run(
+                ["realesrgan-ncnn-vulkan", "-h"],
+                capture_output=True, timeout=5,
+            )
+            available = result.returncode == 0
+        elif name == "rembg":
+            import rembg  # noqa: F401
+            available = True
+        elif name == "scenedetect":
+            import scenedetect  # noqa: F401
+            available = True
+        elif name == "denoiser":
+            import denoiser  # noqa: F401
+            available = True
+
+        # --- Tier 2: GPU tools ---
+        elif name == "ltx_video":
+            try:
+                from ltx_pipelines.text_to_video import TextToVideoPipeline  # noqa: F401
+                available = True
+            except ImportError:
+                # Try diffusers fallback
+                from diffusers import LTXPipeline  # noqa: F401
+                available = True
+        elif name == "coqui_tts":
+            from TTS.api import TTS  # noqa: F401
+            available = True
+        elif name == "musicgen":
+            from audiocraft.models import MusicGen  # noqa: F401
+            available = True
+        elif name == "diffusers":
+            import diffusers  # noqa: F401
+            available = True
+        elif name == "torch_gpu":
+            import torch
+            available = torch.cuda.is_available()
     except Exception:
         pass
 
@@ -36,9 +76,18 @@ def check_tool(name: str) -> bool:
 
 
 def get_available_tools() -> dict:
-    """Return availability of all optional tools."""
-    tools = ["whisperx", "stable_ts", "auto_editor", "pycaps", "moviepy"]
-    return {t: check_tool(t) for t in tools}
+    """Return availability of all optional tools, grouped by tier."""
+    # Original pipeline tools
+    pipeline = ["whisperx", "stable_ts", "auto_editor", "pycaps", "moviepy"]
+
+    # Tier 1: CPU-friendly
+    tier1 = ["realesrgan", "rembg", "scenedetect", "denoiser"]
+
+    # Tier 2: GPU tools
+    tier2 = ["ltx_video", "coqui_tts", "musicgen", "diffusers", "torch_gpu"]
+
+    all_tools = pipeline + tier1 + tier2
+    return {t: check_tool(t) for t in all_tools}
 
 
 def require_tool(name: str):

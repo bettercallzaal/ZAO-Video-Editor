@@ -12,3 +12,15 @@ pyannote.audio>=3.1
 # pip install auto-editor     # Automatic silence/dead-air removal
 # pip install moviepy         # Single-pass caption burn + transitions
 # pip install pycaps          # CSS-styled animated captions
+
+# Tier 1 — CPU-friendly AI tools:
+# pip install scenedetect[opencv]  # Auto scene detection + chapter generation
+# pip install rembg                # Background removal (image + video)
+# pip install denoiser             # Meta's speech denoiser (CPU or GPU)
+# pip install Pillow               # Image processing (usually pre-installed)
+
+# Tier 2 — GPU-powered AI tools (NVIDIA required):
+# pip install diffusers transformers accelerate  # LTX-2 video gen + SD thumbnails
+# pip install ltx-pipelines        # Native LTX-2 pipeline (alternative to diffusers)
+# pip install TTS                  # Coqui XTTS-v2 voice cloning + TTS
+# pip install audiocraft           # Meta MusicGen background music generation

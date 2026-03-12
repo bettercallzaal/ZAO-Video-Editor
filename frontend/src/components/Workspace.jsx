@@ -9,6 +9,7 @@ import MetadataPanel from './MetadataPanel';
 import DictionaryManager from './DictionaryManager';
 import ExportPanel from './ExportPanel';
 import ClipsPanel from './ClipsPanel';
+import AiToolsPanel from './AiToolsPanel';
 import SeoChecklist from './SeoChecklist';
 import GuidedMode from './GuidedMode';
 import { getProject, getVideoUrl } from '../api/client';
@@ -18,6 +19,7 @@ const TABS = [
   { id: 'transcript', label: 'Transcript' },
   { id: 'captions', label: 'Captions' },
   { id: 'clips', label: 'Clips' },
+  { id: 'ai', label: 'AI Tools' },
   { id: 'metadata', label: 'Metadata' },
   { id: 'dictionary', label: 'Dictionary' },
   { id: 'export', label: 'Export' },
@@ -217,6 +219,14 @@ export default function Workspace({ projectName, onBack }) {
               <ClipsPanel
                 projectName={projectName}
                 stages={project.stages}
+                onSeek={handleSeek}
+              />
+            )}
+            {activeTab === 'ai' && (
+              <AiToolsPanel
+                projectName={projectName}
+                stages={project.stages}
+                onComplete={handleStageComplete}
                 onSeek={handleSeek}
               />
             )}
